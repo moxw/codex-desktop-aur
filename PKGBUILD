@@ -1,8 +1,8 @@
 # Maintainer: maria-rcks <maria@kuuro.net>
 
 pkgname=codex-desktop-bin
-pkgver=260210.1703
-pkgrel=4
+pkgver=26.224.1209
+pkgrel=1
 pkgdesc='OpenAI Codex Desktop (repacked from macOS DMG for Linux)'
 arch=('x86_64')
 _electron_pkg='electron40-bin'
@@ -234,7 +234,7 @@ package() {
   install -Dm644 /dev/stdin "$pkgdir/opt/$pkgname/package.json" << 'EOF'
 {
   "name": "codex-desktop-bin",
-  "version": "260210.1703",
+  "version": "26.224.1209",
   "main": "resources/app.asar"
 }
 EOF
