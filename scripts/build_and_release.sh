@@ -2,7 +2,7 @@
 set -euo pipefail
 
 PKGBUILD_PATH="${PKGBUILD_PATH:-PKGBUILD}"
-PKG_FILES_GLOB="${PKG_FILES_GLOB:-*.pkg.tar.zst}"
+RELEASE_ASSET_GLOBS="${RELEASE_ASSET_GLOBS:-*.pkg.tar.zst codex-desktop-prepatched-*.tar.gz}"
 UPSTREAM_SHA256="${UPSTREAM_SHA256:-}"
 DRY_RUN="${DRY_RUN:-false}"
 
@@ -25,14 +25,23 @@ fi
 release_tag="codex-desktop-bin-${pkgver}-${short_sha}"
 release_title="codex-desktop-bin ${pkgver} (${short_sha})"
 
-mapfile -t pkg_files < <(ls -1 $PKG_FILES_GLOB)
-if [[ "${#pkg_files[@]}" -eq 0 ]]; then
-  echo "No package artifacts found matching: $PKG_FILES_GLOB" >&2
+assets=()
+shopt -s nullglob
+for pattern in $RELEASE_ASSET_GLOBS; do
+  for file in $pattern; do
+    assets+=("$file")
+  done
+done
+shopt -u nullglob
+
+if [[ "${#assets[@]}" -eq 0 ]]; then
+  echo "No release assets found for patterns: $RELEASE_ASSET_GLOBS" >&2
   exit 1
 fi
 
 sha_file="sha256sums.txt"
-sha256sum "${pkg_files[@]}" > "$sha_file"
+sha256sum "${assets[@]}" > "$sha_file"
+assets+=("$sha_file")
 
 release_notes="Automated build for pkgver ${pkgver}."
 if [[ -n "$UPSTREAM_SHA256" ]]; then
@@ -43,23 +52,23 @@ fi
 if [[ "$DRY_RUN" == "true" ]]; then
   echo "DRY_RUN=true, skipping GitHub release create/upload."
   echo "Would publish tag: $release_tag"
-  echo "Would upload files: ${pkg_files[*]} $sha_file"
+  echo "Would upload files: ${assets[*]}"
 else
   if gh release view "$release_tag" >/dev/null 2>&1; then
-    gh release upload "$release_tag" "${pkg_files[@]}" "$sha_file" --clobber
+    gh release upload "$release_tag" "${assets[@]}" --clobber
   else
-    gh release create "$release_tag" "${pkg_files[@]}" "$sha_file" \
+    gh release create "$release_tag" "${assets[@]}" \
       --title "$release_title" \
       --notes "$release_notes"
   fi
 fi
 
 printf 'release_tag=%s\n' "$release_tag"
-printf 'release_assets=%s\n' "${pkg_files[*]} $sha_file"
+printf 'release_assets=%s\n' "${assets[*]}"
 
 if [[ -n "${GITHUB_OUTPUT:-}" ]]; then
   {
     printf 'release_tag=%s\n' "$release_tag"
-    printf 'release_assets=%s\n' "${pkg_files[*]} $sha_file"
+    printf 'release_assets=%s\n' "${assets[*]}"
   } >> "$GITHUB_OUTPUT"
 fi

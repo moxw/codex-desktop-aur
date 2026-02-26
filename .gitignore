@@ -3,6 +3,7 @@ src/
 pkg/
 *.pkg.tar.*
 *.src.tar.*
+codex-desktop-prepatched-*.tar.gz
 
 # local caches/workdirs
 .native-addon-cache/

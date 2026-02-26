@@ -11,6 +11,7 @@ permissions:
 env:
   UPSTREAM_URL: ${{ vars.UPSTREAM_URL || 'https://persistent.oaistatic.com/codex-app-prod/Codex.dmg' }}
   STATE_FILE: ${{ vars.STATE_FILE || 'upstream.sha256' }}
+  RELEASE_REPO: ${{ vars.RELEASE_REPO || github.repository }}
   AUR_GIT_URL: ${{ vars.AUR_GIT_URL || 'ssh://aur@aur.archlinux.org/codex-desktop-bin.git' }}
   AUR_BRANCH: ${{ vars.AUR_BRANCH || 'master' }}
   AUR_COMMIT_NAME: ${{ vars.AUR_COMMIT_NAME || 'codex-desktop-ci' }}
@@ -19,7 +20,7 @@ env:
 
 jobs:
   publish:
-    name: Check, build, release, sync AUR
+    name: Check, build, and stage updates
     runs-on: ubuntu-latest
     outputs:
       changed: ${{ steps.check.outputs.changed }}
@@ -38,7 +39,31 @@ jobs:
           set -euo pipefail
           pacman -Sy --noconfirm --needed git openssh rsync curl p7zip node-gyp github-cli jq python
 
+      - name: Validate repository layout
+        run: |
+          set -euo pipefail
+          test -f PKGBUILD
+          test -f .SRCINFO
+          test -f codex-icon.png
+          test -x scripts/check_upstream.sh
+          test -x scripts/build_prepatched_bundle.sh
+          test -x scripts/update_pkgbuild.sh
+          test -x scripts/build_and_release.sh
+          test -x scripts/publish_aur.sh
+
+      - name: Check upstream hash
+        id: check
+        run: |
+          set -euo pipefail
+          scripts/check_upstream.sh
+
+      - name: Skip when no upstream change
+        if: steps.check.outputs.changed != 'true'
+        run: |
+          echo "No upstream change detected; nothing to do."
+
       - name: Resolve Electron target from AUR
+        if: steps.check.outputs.changed == 'true'
         run: |
           set -euo pipefail
 
@@ -58,27 +83,16 @@ jobs:
           echo "Using CODEX_ELECTRON_TARGET=$electron_target"
           echo "CODEX_ELECTRON_TARGET=$electron_target" >> "$GITHUB_ENV"
 
-      - name: Validate repository layout
+      - name: Build prepatched payload bundle
+        if: steps.check.outputs.changed == 'true'
+        id: bundle
+        env:
+          PKGVER_CANDIDATE: ${{ steps.check.outputs.pkgver_candidate }}
         run: |
           set -euo pipefail
-          test -f PKGBUILD
-          test -f .SRCINFO
-          test -f codex-icon.png
-          test -x scripts/check_upstream.sh
-          test -x scripts/update_pkgbuild.sh
-          test -x scripts/build_and_release.sh
-          test -x scripts/publish_aur.sh
-
-      - name: Check upstream hash
-        id: check
-        run: |
-          set -euo pipefail
-          scripts/check_upstream.sh
-
-      - name: Skip when no upstream change
-        if: steps.check.outputs.changed != 'true'
-        run: |
-          echo "No upstream change detected; nothing to do."
+          CODEX_ELECTRON_TARGET="${CODEX_ELECTRON_TARGET}" \
+          PKGVER_CANDIDATE="${PKGVER_CANDIDATE}" \
+          scripts/build_prepatched_bundle.sh
 
       - name: Update PKGBUILD and upstream state
         if: steps.check.outputs.changed == 'true'
@@ -86,6 +100,8 @@ jobs:
         env:
           UPSTREAM_SHA256: ${{ steps.check.outputs.upstream_sha256 }}
           PKGVER_CANDIDATE: ${{ steps.check.outputs.pkgver_candidate }}
+          PREPATCHED_SHA256: ${{ steps.bundle.outputs.bundle_sha256 }}
+          RELEASE_REPO: ${{ env.RELEASE_REPO }}
           STATE_FILE: ${{ env.STATE_FILE }}
         run: |
           set -euo pipefail
@@ -108,7 +124,7 @@ jobs:
         if: steps.check.outputs.changed == 'true'
         run: |
           set -euo pipefail
-          su - builder -c "cd '$GITHUB_WORKSPACE' && CODEX_ELECTRON_TARGET='${CODEX_ELECTRON_TARGET}' makepkg -f --nodeps --noconfirm"
+          su - builder -c "cd '$GITHUB_WORKSPACE' && makepkg -f --nodeps --noconfirm"
 
       - name: Upload built package artifacts
         if: steps.check.outputs.changed == 'true'
@@ -118,21 +134,9 @@ jobs:
           if-no-files-found: error
           path: |
             *.pkg.tar.zst
+            codex-desktop-prepatched-*.tar.gz
 
-      - name: Publish package files to AUR
-        if: steps.check.outputs.changed == 'true'
-        env:
-          AUR_SSH_PRIVATE_KEY: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
-          AUR_GIT_URL: ${{ env.AUR_GIT_URL }}
-          AUR_BRANCH: ${{ env.AUR_BRANCH }}
-          AUR_COMMIT_NAME: ${{ env.AUR_COMMIT_NAME }}
-          AUR_COMMIT_EMAIL: ${{ env.AUR_COMMIT_EMAIL }}
-          AUR_PAYLOAD_FILES: ${{ env.AUR_PAYLOAD_FILES }}
-        run: |
-          set -euo pipefail
-          scripts/publish_aur.sh
-
-      - name: Upload metadata updates for commit job
+      - name: Upload metadata updates for downstream jobs
         if: steps.check.outputs.changed == 'true'
         uses: actions/upload-artifact@v4
         with:
@@ -181,13 +185,51 @@ jobs:
           set -euo pipefail
           scripts/build_and_release.sh
 
+  publish-aur:
+    name: Sync AUR payload
+    runs-on: ubuntu-latest
+    needs:
+      - publish
+      - release-assets
+    if: needs.publish.outputs.changed == 'true' && needs.release-assets.result == 'success'
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Download metadata updates
+        uses: actions/download-artifact@v4
+        with:
+          name: metadata-updates
+          path: .tmp-metadata
+
+      - name: Apply metadata updates
+        run: |
+          set -euo pipefail
+          cp -f .tmp-metadata/PKGBUILD PKGBUILD
+          cp -f .tmp-metadata/.SRCINFO .SRCINFO
+          cp -f ".tmp-metadata/${STATE_FILE}" "${STATE_FILE}"
+
+      - name: Publish package files to AUR
+        env:
+          AUR_SSH_PRIVATE_KEY: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
+          AUR_GIT_URL: ${{ env.AUR_GIT_URL }}
+          AUR_BRANCH: ${{ env.AUR_BRANCH }}
+          AUR_COMMIT_NAME: ${{ env.AUR_COMMIT_NAME }}
+          AUR_COMMIT_EMAIL: ${{ env.AUR_COMMIT_EMAIL }}
+          AUR_PAYLOAD_FILES: ${{ env.AUR_PAYLOAD_FILES }}
+        run: |
+          set -euo pipefail
+          scripts/publish_aur.sh
+
   commit-updates:
     name: Commit metadata updates
     runs-on: ubuntu-latest
     needs:
       - publish
       - release-assets
-    if: needs.publish.outputs.changed == 'true' && needs.release-assets.result == 'success'
+      - publish-aur
+    if: needs.publish.outputs.changed == 'true' && needs.release-assets.result == 'success' && needs.publish-aur.result == 'success'
 
     steps:
       - name: Checkout repository
