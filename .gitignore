@@ -1,0 +1,19 @@
+# makepkg artifacts
+src/
+pkg/
+*.pkg.tar.*
+*.src.tar.*
+
+# local caches/workdirs
+.native-addon-cache/
+work/
+
+# downloaded upstream blobs
+Codex.dmg
+electron-v*.zip
+node-pty-*.tgz
+better-sqlite3-*.tgz
+node-addon-api-*.tgz
+
+# CI release checksums
+sha256sums.txt

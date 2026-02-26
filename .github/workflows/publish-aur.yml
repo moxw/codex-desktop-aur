@@ -1,0 +1,226 @@
+name: Build and publish codex-desktop-bin
+
+on:
+  schedule:
+    - cron: "0 */5 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  UPSTREAM_URL: ${{ vars.UPSTREAM_URL || 'https://persistent.oaistatic.com/codex-app-prod/Codex.dmg' }}
+  STATE_FILE: ${{ vars.STATE_FILE || 'upstream.sha256' }}
+  AUR_GIT_URL: ${{ vars.AUR_GIT_URL || 'ssh://aur@aur.archlinux.org/codex-desktop-bin.git' }}
+  AUR_BRANCH: ${{ vars.AUR_BRANCH || 'master' }}
+  AUR_COMMIT_NAME: ${{ vars.AUR_COMMIT_NAME || 'codex-desktop-ci' }}
+  AUR_COMMIT_EMAIL: ${{ vars.AUR_COMMIT_EMAIL || 'codex-desktop-ci@users.noreply.github.com' }}
+  AUR_PAYLOAD_FILES: ${{ vars.AUR_PAYLOAD_FILES || 'PKGBUILD .SRCINFO codex-icon.png' }}
+
+jobs:
+  publish:
+    name: Check, build, release, sync AUR
+    runs-on: ubuntu-latest
+    outputs:
+      changed: ${{ steps.check.outputs.changed }}
+      pkgver: ${{ steps.update.outputs.pkgver }}
+      pkgrel: ${{ steps.update.outputs.pkgrel }}
+      upstream_sha256: ${{ steps.check.outputs.upstream_sha256 }}
+    container:
+      image: archlinux:base-devel
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install tooling
+        run: |
+          set -euo pipefail
+          pacman -Sy --noconfirm --needed git openssh rsync curl p7zip node-gyp github-cli jq python
+
+      - name: Resolve Electron target from AUR
+        run: |
+          set -euo pipefail
+
+          aur_version="$(curl -fsSL 'https://aur.archlinux.org/rpc/v5/info/electron40-bin' | jq -r '.results[0].Version // empty')"
+          if [[ -z "$aur_version" ]]; then
+            echo "Failed to resolve electron40-bin version from AUR RPC." >&2
+            exit 1
+          fi
+
+          electron_target="${aur_version%%-*}"
+          if [[ -z "$electron_target" ]]; then
+            echo "Failed to derive Electron target from AUR version: $aur_version" >&2
+            exit 1
+          fi
+
+          echo "Resolved electron40-bin AUR version: $aur_version"
+          echo "Using CODEX_ELECTRON_TARGET=$electron_target"
+          echo "CODEX_ELECTRON_TARGET=$electron_target" >> "$GITHUB_ENV"
+
+      - name: Validate repository layout
+        run: |
+          set -euo pipefail
+          test -f PKGBUILD
+          test -f .SRCINFO
+          test -f codex-icon.png
+          test -x scripts/check_upstream.sh
+          test -x scripts/update_pkgbuild.sh
+          test -x scripts/build_and_release.sh
+          test -x scripts/publish_aur.sh
+
+      - name: Check upstream hash
+        id: check
+        run: |
+          set -euo pipefail
+          scripts/check_upstream.sh
+
+      - name: Skip when no upstream change
+        if: steps.check.outputs.changed != 'true'
+        run: |
+          echo "No upstream change detected; nothing to do."
+
+      - name: Update PKGBUILD and upstream state
+        if: steps.check.outputs.changed == 'true'
+        id: update
+        env:
+          UPSTREAM_SHA256: ${{ steps.check.outputs.upstream_sha256 }}
+          PKGVER_CANDIDATE: ${{ steps.check.outputs.pkgver_candidate }}
+          STATE_FILE: ${{ env.STATE_FILE }}
+        run: |
+          set -euo pipefail
+          scripts/update_pkgbuild.sh
+
+      - name: Create non-root build user
+        if: steps.check.outputs.changed == 'true'
+        run: |
+          set -euo pipefail
+          useradd -m builder
+          chown -R builder:builder "$GITHUB_WORKSPACE"
+
+      - name: Regenerate .SRCINFO
+        if: steps.check.outputs.changed == 'true'
+        run: |
+          set -euo pipefail
+          su - builder -c "cd '$GITHUB_WORKSPACE' && makepkg --printsrcinfo > .SRCINFO"
+
+      - name: Build package
+        if: steps.check.outputs.changed == 'true'
+        run: |
+          set -euo pipefail
+          su - builder -c "cd '$GITHUB_WORKSPACE' && CODEX_ELECTRON_TARGET='${CODEX_ELECTRON_TARGET}' makepkg -f --nodeps --noconfirm"
+
+      - name: Upload built package artifacts
+        if: steps.check.outputs.changed == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: package-artifacts
+          if-no-files-found: error
+          path: |
+            *.pkg.tar.zst
+
+      - name: Publish package files to AUR
+        if: steps.check.outputs.changed == 'true'
+        env:
+          AUR_SSH_PRIVATE_KEY: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
+          AUR_GIT_URL: ${{ env.AUR_GIT_URL }}
+          AUR_BRANCH: ${{ env.AUR_BRANCH }}
+          AUR_COMMIT_NAME: ${{ env.AUR_COMMIT_NAME }}
+          AUR_COMMIT_EMAIL: ${{ env.AUR_COMMIT_EMAIL }}
+          AUR_PAYLOAD_FILES: ${{ env.AUR_PAYLOAD_FILES }}
+        run: |
+          set -euo pipefail
+          scripts/publish_aur.sh
+
+      - name: Upload metadata updates for commit job
+        if: steps.check.outputs.changed == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: metadata-updates
+          if-no-files-found: error
+          include-hidden-files: true
+          path: |
+            PKGBUILD
+            .SRCINFO
+            ${{ env.STATE_FILE }}
+
+  release-assets:
+    name: Publish GitHub release assets
+    runs-on: ubuntu-latest
+    needs: publish
+    if: needs.publish.outputs.changed == 'true'
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Download built package artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: package-artifacts
+          path: .
+
+      - name: Download metadata updates
+        uses: actions/download-artifact@v4
+        with:
+          name: metadata-updates
+          path: .tmp-metadata
+
+      - name: Apply metadata updates
+        run: |
+          set -euo pipefail
+          cp -f .tmp-metadata/PKGBUILD PKGBUILD
+          cp -f .tmp-metadata/.SRCINFO .SRCINFO
+          cp -f ".tmp-metadata/${STATE_FILE}" "${STATE_FILE}"
+
+      - name: Publish GitHub release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          UPSTREAM_SHA256: ${{ needs.publish.outputs.upstream_sha256 }}
+        run: |
+          set -euo pipefail
+          scripts/build_and_release.sh
+
+  commit-updates:
+    name: Commit metadata updates
+    runs-on: ubuntu-latest
+    needs:
+      - publish
+      - release-assets
+    if: needs.publish.outputs.changed == 'true' && needs.release-assets.result == 'success'
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Download metadata updates
+        uses: actions/download-artifact@v4
+        with:
+          name: metadata-updates
+          path: .tmp-metadata
+
+      - name: Apply metadata updates
+        run: |
+          set -euo pipefail
+          cp -f .tmp-metadata/PKGBUILD PKGBUILD
+          cp -f .tmp-metadata/.SRCINFO .SRCINFO
+          cp -f ".tmp-metadata/${STATE_FILE}" "${STATE_FILE}"
+
+      - name: Commit and push metadata updates
+        env:
+          PKGVER: ${{ needs.publish.outputs.pkgver }}
+          PKGREL: ${{ needs.publish.outputs.pkgrel }}
+        run: |
+          set -euo pipefail
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add PKGBUILD .SRCINFO "${STATE_FILE}"
+          if git diff --cached --quiet; then
+            echo "No staged changes to commit."
+            exit 0
+          fi
+
+          git commit -m "chore(update): codex ${GITHUB_SHA} -> pkgver ${PKGVER}-${PKGREL}"
+          git push origin "HEAD:${GITHUB_REF_NAME}"
