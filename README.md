@@ -25,6 +25,7 @@ paru -S codex-desktop-bin
 
 - Tracks upstream Codex Desktop releases.
 - Ships a prepatched binary payload built in CI.
+- Depends on the official `openai-codex` package from Arch `extra`.
 - Installs directly from AUR with no manual repack steps.
 
 ## Links

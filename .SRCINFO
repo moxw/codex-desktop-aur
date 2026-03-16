@@ -1,7 +1,7 @@
 pkgbase = codex-desktop-bin
 	pkgdesc = OpenAI Codex Desktop (prepatched Linux payload)
 	pkgver = 26.311.21342
-	pkgrel = 1
+	pkgrel = 2
 	url = https://openai.com/codex
 	arch = x86_64
 	license = custom
@@ -27,7 +27,7 @@ pkgbase = codex-desktop-bin
 	depends = nspr
 	depends = nss
 	depends = pango
-	depends = openai-codex-bin
+	depends = openai-codex
 	provides = codex-desktop
 	conflicts = codex-desktop
 	options = !strip

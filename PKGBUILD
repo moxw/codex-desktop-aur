@@ -2,7 +2,7 @@
 
 pkgname=codex-desktop-bin
 pkgver=26.311.21342
-pkgrel=1
+pkgrel=2
 pkgdesc='OpenAI Codex Desktop (prepatched Linux payload)'
 arch=('x86_64')
 _electron_pkg='electron40-bin'
@@ -34,7 +34,7 @@ depends=(
   'nspr'
   'nss'
   'pango'
-  'openai-codex-bin'
+  'openai-codex'
 )
 provides=('codex-desktop')
 conflicts=('codex-desktop')
@@ -75,7 +75,7 @@ EOF
 
 export ELECTRON_FORCE_IS_PACKAGED=1
 
-# Prefer the codex CLI from openai-codex-bin if available.
+# Prefer the codex CLI from the official openai-codex package if available.
 if [[ -z "${CODEX_CLI_PATH-}" ]] && command -v codex >/dev/null 2>&1; then
   export CODEX_CLI_PATH="$(command -v codex)"
 fi
